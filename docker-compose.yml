@@ -1,0 +1,22 @@
+services:
+  # Simulate mode: exercises the full chain (consume agent_commands, download from
+  # core, report agent_events) without an audio device. For real sound run the
+  # agent on the host near the speakers instead: dotnet run --project src/AeroFlow.Agent
+  aeroflow_agent:
+    build:
+      context: .
+      dockerfile: _docker/Dockerfile
+    container_name: aeroflow_agent
+    restart: unless-stopped
+    environment:
+      AGENT_Agent__AmqpUri: amqp://guest:guest@host.docker.internal:5672/
+      AGENT_Agent__CoreBaseUrl: http://host.docker.internal:8080/
+      AGENT_Agent__CacheDir: /var/agent-cache
+      AGENT_Agent__Simulate: "true"
+    volumes:
+      - agent_cache:/var/agent-cache
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  agent_cache:

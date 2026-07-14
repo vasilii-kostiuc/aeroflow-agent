@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/AeroFlow.Agent/AeroFlow.Agent.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/AeroFlow.Agent.Tests/AeroFlow.Agent.Tests.csproj" />
+  </Folder>
+</Solution>

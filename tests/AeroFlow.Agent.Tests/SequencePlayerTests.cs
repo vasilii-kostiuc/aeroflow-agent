@@ -1,0 +1,89 @@
+using AeroFlow.Agent.Audio;
+using AeroFlow.Agent.Contracts;
+
+namespace AeroFlow.Agent.Tests;
+
+public sealed class SequencePlayerTests
+{
+    private static PlaySequenceCommand Command(params PlaybackStep[] steps) =>
+        new("m-1", "j-1", steps, 1);
+
+    [Fact]
+    public async Task PlaysEveryAssetInOrderAndCompletes()
+    {
+        var cache = new FakeCache();
+        var runner = new FakeRunner();
+        var assetA = Guid.NewGuid();
+        var assetB = Guid.NewGuid();
+
+        var result = await new SequencePlayer(cache, runner).PlayAsync(
+            Command(new PlayAssetStep(assetA), new PauseStep(0), new PlayAssetStep(assetB)),
+            CancellationToken.None);
+
+        Assert.True(result.Completed);
+        Assert.Equal([$"/cache/{assetA}.wav", $"/cache/{assetB}.wav"], runner.Played);
+    }
+
+    [Fact]
+    public async Task FailsWhenAssetIsUnavailable()
+    {
+        var missing = Guid.NewGuid();
+        var cache = new FakeCache { Unavailable = missing };
+        var runner = new FakeRunner();
+
+        var result = await new SequencePlayer(cache, runner).PlayAsync(
+            Command(new PlayAssetStep(missing), new PlayAssetStep(Guid.NewGuid())),
+            CancellationToken.None);
+
+        Assert.False(result.Completed);
+        Assert.Contains(missing.ToString(), result.Reason);
+        // Playback stops on the first failure — nothing after the broken asset plays.
+        Assert.Empty(runner.Played);
+    }
+
+    [Fact]
+    public async Task FailsWhenPlayerExitsNonZero()
+    {
+        var cache = new FakeCache();
+        var runner = new FakeRunner { ExitCode = 1 };
+
+        var result = await new SequencePlayer(cache, runner).PlayAsync(
+            Command(new PlayAssetStep(Guid.NewGuid())),
+            CancellationToken.None);
+
+        Assert.False(result.Completed);
+        Assert.Contains("code 1", result.Reason);
+    }
+
+    private sealed class FakeCache : IAudioCache
+    {
+        public Guid? Unavailable { get; init; }
+
+        public Task<string> GetFilePathAsync(Guid audioAssetId, CancellationToken cancellationToken)
+        {
+            if (audioAssetId == Unavailable)
+            {
+                throw new AudioUnavailableException($"Core returned 404 for asset {audioAssetId}.");
+            }
+
+            return Task.FromResult($"/cache/{audioAssetId}.wav");
+        }
+    }
+
+    private sealed class FakeRunner : IPlayerProcessRunner
+    {
+        public int ExitCode { get; init; }
+
+        public List<string> Played { get; } = [];
+
+        public Task<int> PlayAsync(string filePath, CancellationToken cancellationToken)
+        {
+            if (ExitCode == 0)
+            {
+                Played.Add(filePath);
+            }
+
+            return Task.FromResult(ExitCode);
+        }
+    }
+}
