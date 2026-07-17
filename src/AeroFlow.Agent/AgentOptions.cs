@@ -24,6 +24,14 @@ public sealed class AgentOptions
     /// <summary>System player command; {file} is replaced with the audio file path.</summary>
     public string PlayerCommand { get; set; } = "ffplay -nodisp -autoexit -loglevel error {file}";
 
+    /// <summary>
+    /// Commands older than this are reported failed instead of played: an airport
+    /// announcement is meaningful for minutes, but the durable queue survives for
+    /// days (e.g. commands accumulated while the agent was offline). The margin
+    /// also absorbs clock skew between the playback host and this machine.
+    /// </summary>
+    public int MaxCommandAgeSeconds { get; set; } = 300;
+
     /// <summary>When true, logs and waits instead of playing (no audio device needed).</summary>
     public bool Simulate { get; set; }
 

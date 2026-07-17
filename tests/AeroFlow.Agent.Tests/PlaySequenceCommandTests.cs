@@ -31,6 +31,7 @@ public sealed class PlaySequenceCommandTests
         Assert.Equal("m-1", command.MessageId);
         Assert.Equal("j-1", command.JobId);
         Assert.Equal(1, command.SchemaVersion);
+        Assert.Equal(DateTimeOffset.Parse("2026-07-10T10:00:00+00:00"), command.OccurredAt);
         // ro-MD group (sortOrder 0) plays before ru (sortOrder 1), pause kept in place.
         Assert.Equal(
             new PlaybackStep[]
@@ -51,6 +52,26 @@ public sealed class PlaySequenceCommandTests
     public void RejectsNonContractBodies(string json)
     {
         Assert.Throws<ContractViolationException>(() => PlaySequenceCommand.FromJson(json));
+    }
+
+    [Theory]
+    [InlineData(-10 * 60, true)] // ten minutes old — stale
+    [InlineData(-60, false)] // one minute old — fresh
+    [InlineData(60, false)] // clock skew into the future — fresh
+    public void DetectsStaleCommands(int ageSeconds, bool expectStale)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var command = new PlaySequenceCommand("m-1", "j-1", [], 1, now.AddSeconds(ageSeconds));
+
+        Assert.Equal(expectStale, command.IsStale(TimeSpan.FromSeconds(300), now));
+    }
+
+    [Fact]
+    public void CommandWithoutOccurredAtIsNeverStale()
+    {
+        var command = new PlaySequenceCommand("m-1", "j-1", [], 1, null);
+
+        Assert.False(command.IsStale(TimeSpan.FromSeconds(300), DateTimeOffset.UtcNow));
     }
 
     [Fact]

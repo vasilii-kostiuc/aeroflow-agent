@@ -32,6 +32,7 @@ dotnet run --project src/AeroFlow.Agent
 | `CoreBaseUrl` | базовый URL core для скачивания аудио | `http://localhost:8080/` |
 | `CacheDir` | локальный кэш файлов и маркеры дедупликации | `var/cache` |
 | `PlayerCommand` | команда плеера, `{file}` — путь к файлу | `ffplay -nodisp -autoexit -loglevel error {file}` |
+| `MaxCommandAgeSeconds` | команды старше порога не играются, а фейлятся как `stale command` (защита от бэклога durable-очереди, пока агент был выключен) | `300` |
 | `Simulate` | режим без звука: лог + пауза (docker/CI) | `false` |
 
 ## Тесты

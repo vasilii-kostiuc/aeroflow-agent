@@ -13,9 +13,19 @@ public sealed record PlaySequenceCommand(
     string MessageId,
     string JobId,
     IReadOnlyList<PlaybackStep> Steps,
-    int SchemaVersion)
+    int SchemaVersion,
+    DateTimeOffset? OccurredAt)
 {
     public const string CommandName = "audio.play_sequence";
+
+    /// <summary>
+    /// An announcement is meaningful for minutes; a durable queue survives for
+    /// days. A command whose occurredAt is older than maxAge must be reported
+    /// failed, not played. A command without a parseable occurredAt is treated
+    /// as fresh — staleness is a safety net, not a gate.
+    /// </summary>
+    public bool IsStale(TimeSpan maxAge, DateTimeOffset now) =>
+        OccurredAt is not null && now - OccurredAt.Value > maxAge;
 
     /// <summary>
     /// Parses the wire JSON. Throws <see cref="ContractViolationException"/> when the
@@ -52,7 +62,15 @@ public sealed record PlaySequenceCommand(
                 throw new ContractViolationException("Contract is missing \"audioSequence\".");
             }
 
-            return new PlaySequenceCommand(messageId, jobId, BuildSteps(sequence), schemaVersion);
+            DateTimeOffset? occurredAt = null;
+            if (root.TryGetProperty("occurredAt", out var occurred)
+                && occurred.ValueKind == JsonValueKind.String
+                && DateTimeOffset.TryParse(occurred.GetString(), out var parsed))
+            {
+                occurredAt = parsed;
+            }
+
+            return new PlaySequenceCommand(messageId, jobId, BuildSteps(sequence), schemaVersion, occurredAt);
         }
     }
 

@@ -97,6 +97,22 @@ public sealed class Worker : BackgroundService
             return;
         }
 
+        // Stale-command guard: commands that waited in the durable queue for too
+        // long (agent offline, clock skew aside) must not sound days later — the
+        // failure travels back so playback marks the job Failed and the queue
+        // screen shows why nothing was heard.
+        var maxAge = TimeSpan.FromSeconds(_options.MaxCommandAgeSeconds);
+        if (command.IsStale(maxAge, DateTimeOffset.UtcNow))
+        {
+            var reason = $"stale command: issued {command.OccurredAt:O}, older than {_options.MaxCommandAgeSeconds}s";
+            _logger.LogWarning("Job {JobId}: {Reason}", command.JobId, reason);
+            await publisher.PublishAsync(AgentEvent.Failed(command.JobId, reason), cancellationToken);
+            _processed.MarkDone(command.MessageId);
+            await channel.BasicAckAsync(delivery.DeliveryTag, multiple: false, cancellationToken);
+
+            return;
+        }
+
         _logger.LogInformation("Playing job {JobId} ({Steps} steps)", command.JobId, command.Steps.Count);
         await publisher.PublishAsync(AgentEvent.Started(command.JobId), cancellationToken);
 

@@ -6,7 +6,7 @@ namespace AeroFlow.Agent.Tests;
 public sealed class SequencePlayerTests
 {
     private static PlaySequenceCommand Command(params PlaybackStep[] steps) =>
-        new("m-1", "j-1", steps, 1);
+        new("m-1", "j-1", steps, 1, DateTimeOffset.UtcNow);
 
     [Fact]
     public async Task PlaysEveryAssetInOrderAndCompletes()
