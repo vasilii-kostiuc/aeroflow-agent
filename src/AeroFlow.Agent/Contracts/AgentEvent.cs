@@ -16,6 +16,8 @@ public sealed record AgentEvent(string Event, string MessageId, string JobId, st
 
     public static AgentEvent Failed(string jobId, string reason) => new("audio.playback_failed", NewId(), jobId, reason);
 
+    public static AgentEvent Interrupted(string jobId) => new("audio.playback_interrupted", NewId(), jobId, null);
+
     public string ToJson()
     {
         using var stream = new MemoryStream();

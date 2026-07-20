@@ -55,6 +55,54 @@ public sealed class SequencePlayerTests
         Assert.Contains("code 1", result.Reason);
     }
 
+    [Fact]
+    public async Task CancellationDuringPlayPropagatesAsOperationCanceled()
+    {
+        var cache = new FakeCache();
+        using var cancellation = new CancellationTokenSource();
+        var runner = new CancellingRunner(cancellation);
+
+        // The runner cancels mid-play, as an audio.stop would: the player must not
+        // swallow the cancellation into a Failure result — the Worker maps it to
+        // audio.playback_interrupted, not audio.playback_failed.
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            new SequencePlayer(cache, runner).PlayAsync(
+                Command(new PlayAssetStep(Guid.NewGuid()), new PlayAssetStep(Guid.NewGuid())),
+                cancellation.Token));
+
+        Assert.Equal(1, runner.Started);
+    }
+
+    [Fact]
+    public async Task CancellationDuringPauseStepPropagatesAsOperationCanceled()
+    {
+        var cache = new FakeCache();
+        var runner = new FakeRunner();
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            new SequencePlayer(cache, runner).PlayAsync(
+                Command(new PauseStep(60_000), new PlayAssetStep(Guid.NewGuid())),
+                cancellation.Token));
+
+        Assert.Empty(runner.Played);
+    }
+
+    private sealed class CancellingRunner(CancellationTokenSource cancellation) : IPlayerProcessRunner
+    {
+        public int Started { get; private set; }
+
+        public async Task<int> PlayAsync(string filePath, CancellationToken cancellationToken)
+        {
+            Started++;
+            cancellation.Cancel();
+            await Task.Delay(Timeout.Infinite, cancellationToken);
+
+            return 0;
+        }
+    }
+
     private sealed class FakeCache : IAudioCache
     {
         public Guid? Unavailable { get; init; }

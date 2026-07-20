@@ -36,7 +36,28 @@ public sealed class ProcessPlayerRunner : IPlayerProcessRunner
         using var process = Process.Start(startInfo)
             ?? throw new InvalidOperationException($"Unable to start player \"{parts[0]}\".");
 
-        await process.WaitForExitAsync(cancellationToken);
+        try
+        {
+            await process.WaitForExitAsync(cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+            }
+            catch (InvalidOperationException)
+            {
+                // The player exited between the check and the kill — nothing left to stop.
+            }
+
+            await process.WaitForExitAsync(CancellationToken.None);
+
+            throw;
+        }
 
         return process.ExitCode;
     }

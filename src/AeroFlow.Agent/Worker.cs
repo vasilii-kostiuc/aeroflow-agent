@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 using AeroFlow.Agent.Audio;
 using AeroFlow.Agent.Contracts;
 using AeroFlow.Agent.Dedupe;
@@ -10,12 +11,9 @@ using RabbitMQ.Client.Events;
 namespace AeroFlow.Agent;
 
 /// <summary>
-/// The agent's single long-running loop: consume agent_commands with prefetch 1
-/// (strictly sequential — the single-active invariant lives in playback, the agent
-/// simply never plays two things at once), play, report the verdict, ack.
-///
-/// No airport business logic lives here: the agent sees a job id and a neutral
-/// audio sequence, nothing else.
+/// Consumes the neutral agent_commands contract. Playback owns queue ordering; the
+/// agent owns a single physical player and accepts an audio.stop while its play
+/// task runs in the background.
 /// </summary>
 public sealed class Worker : BackgroundService
 {
@@ -24,13 +22,10 @@ public sealed class Worker : BackgroundService
     private readonly IPlayerProcessRunner _player;
     private readonly ProcessedMessages _processed;
     private readonly ILogger<Worker> _logger;
+    private readonly Lock _activeLock = new();
+    private ActivePlayback? _active;
 
-    public Worker(
-        IOptions<AgentOptions> options,
-        IAudioCache cache,
-        IPlayerProcessRunner player,
-        ProcessedMessages processed,
-        ILogger<Worker> logger)
+    public Worker(IOptions<AgentOptions> options, IAudioCache cache, IPlayerProcessRunner player, ProcessedMessages processed, ILogger<Worker> logger)
     {
         _options = options.Value;
         _cache = cache;
@@ -42,94 +37,157 @@ public sealed class Worker : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var factory = new ConnectionFactory { Uri = new Uri(_options.AmqpUri) };
-
         await using var connection = await factory.CreateConnectionAsync(stoppingToken);
         await using var channel = await connection.CreateChannelAsync(cancellationToken: stoppingToken);
-
-        // Declarations are idempotent and match Messenger's defaults (durable queues),
-        // so either side may start first.
         await channel.QueueDeclareAsync(_options.CommandsQueue, durable: true, exclusive: false, autoDelete: false, cancellationToken: stoppingToken);
         await channel.QueueDeclareAsync(_options.EventsQueue, durable: true, exclusive: false, autoDelete: false, cancellationToken: stoppingToken);
         await channel.BasicQosAsync(prefetchSize: 0, prefetchCount: 1, global: false, cancellationToken: stoppingToken);
 
         var publisher = new AgentEventPublisher(channel, _options.EventsQueue);
-        var sequencePlayer = new SequencePlayer(_cache, _player);
-
+        var player = new SequencePlayer(_cache, _player);
         var consumer = new AsyncEventingBasicConsumer(channel);
-        consumer.ReceivedAsync += async (_, delivery) =>
-        {
-            await HandleDeliveryAsync(channel, publisher, sequencePlayer, delivery, stoppingToken);
-        };
-
+        consumer.ReceivedAsync += (_, delivery) => HandleDeliveryAsync(channel, publisher, player, delivery, stoppingToken);
         await channel.BasicConsumeAsync(_options.CommandsQueue, autoAck: false, consumer, cancellationToken: stoppingToken);
         _logger.LogInformation("Agent consuming {Queue} (simulate: {Simulate})", _options.CommandsQueue, _options.Simulate);
-
         await Task.Delay(Timeout.Infinite, stoppingToken);
     }
 
-    private async Task HandleDeliveryAsync(
-        IChannel channel,
-        AgentEventPublisher publisher,
-        SequencePlayer sequencePlayer,
-        BasicDeliverEventArgs delivery,
-        CancellationToken cancellationToken)
+    private async Task HandleDeliveryAsync(IChannel channel, AgentEventPublisher publisher, SequencePlayer player, BasicDeliverEventArgs delivery, CancellationToken stoppingToken)
     {
-        PlaySequenceCommand command;
+        var json = Encoding.UTF8.GetString(delivery.Body.Span);
         try
         {
-            command = PlaySequenceCommand.FromJson(Encoding.UTF8.GetString(delivery.Body.Span));
+            var command = CommandName(json);
+            if (command == PlaySequenceCommand.CommandName)
+            {
+                await StartAsync(channel, publisher, player, PlaySequenceCommand.FromJson(json), delivery.DeliveryTag, stoppingToken);
+                return;
+            }
+
+            if (command == StopPlaybackCommand.CommandName)
+            {
+                await StopAsync(channel, StopPlaybackCommand.FromJson(json), delivery.DeliveryTag, stoppingToken);
+                return;
+            }
+
+            throw new ContractViolationException($"Unknown command \"{command}\".");
         }
         catch (ContractViolationException exception)
         {
-            // A malformed message would fail forever; drop it loudly instead of
-            // blocking the sound channel.
             _logger.LogError(exception, "Dropping non-contract message from {Queue}", _options.CommandsQueue);
-            await channel.BasicAckAsync(delivery.DeliveryTag, multiple: false, cancellationToken);
-
-            return;
+            await channel.BasicAckAsync(delivery.DeliveryTag, multiple: false, stoppingToken);
         }
+    }
 
+    private async Task StartAsync(IChannel channel, AgentEventPublisher publisher, SequencePlayer player, PlaySequenceCommand command, ulong deliveryTag, CancellationToken stoppingToken)
+    {
         if (!_processed.TryBegin(command.MessageId))
         {
-            _logger.LogInformation("Skipping already processed command {MessageId} (job {JobId})", command.MessageId, command.JobId);
-            await channel.BasicAckAsync(delivery.DeliveryTag, multiple: false, cancellationToken);
-
+            await channel.BasicAckAsync(deliveryTag, false, stoppingToken);
             return;
         }
 
-        // Stale-command guard: commands that waited in the durable queue for too
-        // long (agent offline, clock skew aside) must not sound days later — the
-        // failure travels back so playback marks the job Failed and the queue
-        // screen shows why nothing was heard.
-        var maxAge = TimeSpan.FromSeconds(_options.MaxCommandAgeSeconds);
-        if (command.IsStale(maxAge, DateTimeOffset.UtcNow))
+        if (command.IsStale(TimeSpan.FromSeconds(_options.MaxCommandAgeSeconds), DateTimeOffset.UtcNow))
         {
             var reason = $"stale command: issued {command.OccurredAt:O}, older than {_options.MaxCommandAgeSeconds}s";
-            _logger.LogWarning("Job {JobId}: {Reason}", command.JobId, reason);
-            await publisher.PublishAsync(AgentEvent.Failed(command.JobId, reason), cancellationToken);
+            await publisher.PublishAsync(AgentEvent.Failed(command.JobId, reason), stoppingToken);
             _processed.MarkDone(command.MessageId);
-            await channel.BasicAckAsync(delivery.DeliveryTag, multiple: false, cancellationToken);
-
+            await channel.BasicAckAsync(deliveryTag, false, stoppingToken);
             return;
         }
 
-        _logger.LogInformation("Playing job {JobId} ({Steps} steps)", command.JobId, command.Steps.Count);
-        await publisher.PublishAsync(AgentEvent.Started(command.JobId), cancellationToken);
-
-        var result = await sequencePlayer.PlayAsync(command, cancellationToken);
-
-        if (result.Completed)
+        var cancellation = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+        lock (_activeLock)
         {
-            await publisher.PublishAsync(AgentEvent.Completed(command.JobId), cancellationToken);
-            _logger.LogInformation("Job {JobId} completed", command.JobId);
-        }
-        else
-        {
-            await publisher.PublishAsync(AgentEvent.Failed(command.JobId, result.Reason!), cancellationToken);
-            _logger.LogWarning("Job {JobId} failed: {Reason}", command.JobId, result.Reason);
+            if (_active is not null)
+            {
+                cancellation.Dispose();
+                throw new ContractViolationException("A playback job is already active.");
+            }
+            _active = new ActivePlayback(command.JobId, cancellation);
         }
 
-        _processed.MarkDone(command.MessageId);
-        await channel.BasicAckAsync(delivery.DeliveryTag, multiple: false, cancellationToken);
+        await publisher.PublishAsync(AgentEvent.Started(command.JobId), stoppingToken);
+        _ = RunPlaybackAsync(command, player, publisher, cancellation);
+        // Ack after starting, not after completing: a later audio.stop must be
+        // deliverable while the player process is alive.
+        await channel.BasicAckAsync(deliveryTag, false, stoppingToken);
     }
+
+    private async Task StopAsync(IChannel channel, StopPlaybackCommand command, ulong deliveryTag, CancellationToken stoppingToken)
+    {
+        if (_processed.TryBegin(command.MessageId))
+        {
+            lock (_activeLock)
+            {
+                if (_active?.JobId == command.JobId)
+                {
+                    _active.Cancellation.Cancel();
+                }
+            }
+            _processed.MarkDone(command.MessageId);
+        }
+
+        await channel.BasicAckAsync(deliveryTag, false, stoppingToken);
+    }
+
+    private async Task RunPlaybackAsync(PlaySequenceCommand command, SequencePlayer player, AgentEventPublisher publisher, CancellationTokenSource cancellation)
+    {
+        AgentEvent verdict;
+        try
+        {
+            var result = await player.PlayAsync(command, cancellation.Token);
+            verdict = result.Completed
+                ? AgentEvent.Completed(command.JobId)
+                : AgentEvent.Failed(command.JobId, result.Reason!);
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+            verdict = AgentEvent.Interrupted(command.JobId);
+        }
+        catch (Exception exception)
+        {
+            _logger.LogError(exception, "Job {JobId} failed unexpectedly", command.JobId);
+            verdict = AgentEvent.Failed(command.JobId, exception.Message);
+        }
+
+        // Release the active slot before reporting the verdict: the moment playback
+        // hears a terminal event it may dispatch the next play command, and that
+        // command must find the agent free instead of being dropped as a violation.
+        _processed.MarkDone(command.MessageId);
+        lock (_activeLock)
+        {
+            if (_active?.JobId == command.JobId)
+            {
+                _active = null;
+            }
+        }
+        cancellation.Dispose();
+
+        try
+        {
+            await publisher.PublishAsync(verdict, CancellationToken.None);
+        }
+        catch (Exception exception)
+        {
+            _logger.LogError(exception, "Job {JobId}: failed to publish {Event}", command.JobId, verdict.Event);
+        }
+    }
+
+    private static string CommandName(string json)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            return document.RootElement.TryGetProperty("command", out var command) && command.ValueKind == JsonValueKind.String
+                ? command.GetString()!
+                : throw new ContractViolationException("Contract is missing \"command\".");
+        }
+        catch (JsonException exception)
+        {
+            throw new ContractViolationException("Body is not valid JSON.", exception);
+        }
+    }
+
+    private sealed record ActivePlayback(string JobId, CancellationTokenSource Cancellation);
 }
