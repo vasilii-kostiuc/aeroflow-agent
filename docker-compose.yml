@@ -11,6 +11,7 @@ services:
     environment:
       AGENT_Agent__AmqpUri: amqp://guest:guest@host.docker.internal:5672/
       AGENT_Agent__CoreBaseUrl: http://host.docker.internal:8080/
+      AGENT_Agent__CoreToken: dev-agent-token
       AGENT_Agent__CacheDir: /var/agent-cache
       AGENT_Agent__Simulate: "true"
     volumes:

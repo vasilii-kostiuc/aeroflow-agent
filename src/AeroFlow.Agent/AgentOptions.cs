@@ -9,6 +9,12 @@ public sealed class AgentOptions
     /// <summary>AMQP connection string to the shared RabbitMQ broker.</summary>
     public string AmqpUri { get; set; } = "amqp://guest:guest@localhost:5672/";
 
+    /// <summary>
+    /// CA certificate of an amqps:// broker with a private CA (ca.crt from the
+    /// server); empty to trust the system store.
+    /// </summary>
+    public string BrokerCaCertPath { get; set; } = "";
+
     /// <summary>Queue with inbound commands from aeroflow-playback.</summary>
     public string CommandsQueue { get; set; } = "agent_commands";
 
@@ -17,6 +23,9 @@ public sealed class AgentOptions
 
     /// <summary>Base URL of aeroflow-core for the audio download endpoint.</summary>
     public string CoreBaseUrl { get; set; } = "http://localhost:8080/";
+
+    /// <summary>Token for the download endpoint (AGENT_TOKEN of core), sent as a bearer token.</summary>
+    public string CoreToken { get; set; } = "";
 
     /// <summary>Local directory for downloaded audio files and processed markers.</summary>
     public string CacheDir { get; set; } = "var/cache";
