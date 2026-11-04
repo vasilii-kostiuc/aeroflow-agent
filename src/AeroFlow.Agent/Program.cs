@@ -1,3 +1,4 @@
+using System.Net.Http.Headers;
 using AeroFlow.Agent;
 using AeroFlow.Agent.Audio;
 using AeroFlow.Agent.Dedupe;
@@ -11,7 +12,9 @@ builder.Services.Configure<AgentOptions>(builder.Configuration.GetSection("Agent
 
 builder.Services.AddHttpClient<IAudioCache, DiskAudioCache>((provider, client) =>
 {
-    client.BaseAddress = new Uri(provider.GetRequiredService<IOptions<AgentOptions>>().Value.CoreBaseUrl);
+    var options = provider.GetRequiredService<IOptions<AgentOptions>>().Value;
+    client.BaseAddress = new Uri(options.CoreBaseUrl);
+    client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", options.CoreToken);
 });
 
 builder.Services.AddSingleton<ProcessedMessages>();

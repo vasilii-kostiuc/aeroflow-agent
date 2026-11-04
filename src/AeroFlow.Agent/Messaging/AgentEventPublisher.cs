@@ -10,18 +10,19 @@ public interface IAgentEventPublisher
 }
 
 /// <summary>
-/// Publishes agent status events to the agent_events queue as persistent messages.
-/// The channel is provided by the worker that owns the connection lifecycle.
+/// Publishes agent status events as persistent messages to the agent_events
+/// exchange, bound to the queue of the same name. The channel is provided by the
+/// worker that owns the connection lifecycle.
 /// </summary>
 public sealed class AgentEventPublisher : IAgentEventPublisher
 {
     private readonly IChannel _channel;
-    private readonly string _queue;
+    private readonly string _exchange;
 
-    public AgentEventPublisher(IChannel channel, string queue)
+    public AgentEventPublisher(IChannel channel, string exchange)
     {
         _channel = channel;
-        _queue = queue;
+        _exchange = exchange;
     }
 
     public async Task PublishAsync(AgentEvent agentEvent, CancellationToken cancellationToken)
@@ -34,8 +35,8 @@ public sealed class AgentEventPublisher : IAgentEventPublisher
         };
 
         await _channel.BasicPublishAsync(
-            exchange: "",
-            routingKey: _queue,
+            exchange: _exchange,
+            routingKey: "",
             mandatory: false,
             basicProperties: properties,
             body: Encoding.UTF8.GetBytes(agentEvent.ToJson()),
